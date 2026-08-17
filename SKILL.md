@@ -308,7 +308,61 @@ python scripts/smooth_stl.py
 
 ---
 
-## 7. Troubleshooting
+## 7. Whole-brain model (cerebrum + cerebellum + brainstem)
+
+The pial surface gives you the cerebrum only. To add the cerebellum and brainstem (a full "whole brain"), pull them from the aseg segmentation and merge everything with **per-part smoothing**.
+
+### 7.1 Extract cerebellum + brainstem
+
+Run [`scripts/extract_cerebellum_brainstem.sh`](scripts/extract_cerebellum_brainstem.sh) inside the container. It binarizes the aseg labels for the cerebellum (7,8,46,47) and brainstem (16), runs marching cubes (`mri_mc`), and converts each to STL.
+
+### 7.2 Build the whole brain (per-part smoothing)
+
+Run [`scripts/build_whole_brain.py`](scripts/build_whole_brain.py):
+
+```bash
+pip install trimesh manifold3d   # boolean + smoothing engines
+python scripts/build_whole_brain.py
+```
+
+**Why smooth each part separately, not the merged model?**
+
+The three parts have very different surface natures:
+
+| Part | Source | Surface | Smoothing |
+|---|---|---|---|
+| Cerebrum | pial surface | already smooth, fine gyri | **2 light passes** (preserve folds) |
+| Cerebellum | aseg marching cubes | voxel staircase | **20 passes** (remove steps) |
+| Brainstem | aseg marching cubes | voxel staircase | **20 passes** (remove steps) |
+
+Smoothing the merged whole uniformly would either melt the cerebrum's gyri (too strong) or leave the cerebellum/brainstem stepped (too weak). Smooth-then-merge hits both goals.
+
+**Keeping the cerebrum and cerebellum separated (the tentorial gap):**
+
+FreeSurfer's pial surface and aseg labels overlap at the tentorium — the cerebrum's inferior occipital pole (its pial dips too low) against the cerebellum's top (its aseg label rises too high). A plain union would weld them together, which is anatomically wrong: they should stay separated by the tentorial gap. The script therefore:
+
+1. trims the cerebrum's inferior occipital pole (`Z < 10`, only in the midline-posterior region),
+2. trims the cerebellum's tentorial top (`Z > -5`),
+3. unions the three, leaving a ~6 mm tentorial gap while the brainstem still bridges them.
+
+The brainstem is deliberately left untrimmed: its apex (`Y > -27`) reaches the cerebrum and its base connects the cerebellum, so it remains the only bridge — exactly the real anatomy. (The brainstem apex and the cerebellum top don't overlap in `Y`, which is what makes this split clean.)
+
+Output: `output/ultimate_brain.stl` — a single watertight solid.
+
+### 7.3 Verify the gap
+
+```python
+import trimesh
+m = trimesh.load("output/ultimate_brain.stl")
+for z in [0, 2, 4]:
+    sec = m.section(plane_origin=[0, 0, z], plane_normal=[0, 0, 1])
+    rear = ((abs(sec.vertices[:, 0]) < 15) & (sec.vertices[:, 1] < -27) & (sec.vertices[:, 1] > -48)).sum()
+    print(f"Z={z}: {rear} verts in the tentorial region")  # 0 = separated
+```
+
+---
+
+## 8. Troubleshooting
 
 ### Environment
 
@@ -343,5 +397,7 @@ python scripts/smooth_stl.py
 - [`scripts/run_recon.sh`](scripts/run_recon.sh) — recon-all wrapper (config at top)
 - [`scripts/merge_stl.py`](scripts/merge_stl.py) — concatenate lh/rh pial STLs
 - [`scripts/smooth_stl.py`](scripts/smooth_stl.py) — Taubin smoothing
+- [`scripts/extract_cerebellum_brainstem.sh`](scripts/extract_cerebellum_brainstem.sh) — extract cerebellum + brainstem from aseg
+- [`scripts/build_whole_brain.py`](scripts/build_whole_brain.py) — per-part smoothing + trim + boolean-union into the whole brain
 
 **Privacy**: MRI data, patient info, and the FreeSurfer license are all sensitive — never commit them to a public repository.

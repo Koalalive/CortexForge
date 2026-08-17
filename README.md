@@ -37,6 +37,7 @@ A real, anatomically-accurate model of a specific brain:
 3. **Surface extraction** — `mris_convert` turns the lh/rh pial surfaces into STL
 4. **Merge + watertight** — `trimesh` concatenates the hemispheres → `brain_full.stl`
 5. **Smoothing** — Taubin smoothing → `brain_full_smooth.stl`
+6. **(Optional) Whole brain** — add cerebellum + brainstem from aseg, smooth each part separately, boolean-union → `ultimate_brain.stl`
 
 ## 🧭 New to FreeSurfer?
 
@@ -50,6 +51,8 @@ The full tutorial — [SKILL.md](SKILL.md) — has a dedicated **"Understanding 
 | [`scripts/run_recon.sh`](scripts/run_recon.sh) | recon-all wrapper (config at top) |
 | [`scripts/merge_stl.py`](scripts/merge_stl.py) | concatenate lh/rh pial STLs |
 | [`scripts/smooth_stl.py`](scripts/smooth_stl.py) | Taubin smoothing |
+| [`scripts/extract_cerebellum_brainstem.sh`](scripts/extract_cerebellum_brainstem.sh) | extract cerebellum + brainstem from aseg |
+| [`scripts/build_whole_brain.py`](scripts/build_whole_brain.py) | per-part smoothing + trim + boolean-union into the whole brain |
 
 ## 🔧 Dependencies
 
