@@ -1,0 +1,4 @@
+# Ensure shell scripts keep LF line endings (executed inside Linux containers)
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf

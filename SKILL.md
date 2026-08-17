@@ -1,113 +1,99 @@
 ---
 name: mri-brain-to-3d-print
-description: 从脑部 MRI（DICOM/NIfTI）数据生成可用于 3D 打印的大脑皮层 STL 模型。涵盖 dcm2niix 转换、FreeSurfer recon-all 皮层重建、pial 表面提取、左右半球合并与水密化、Taubin 平滑全流程。触发词：MRI、DICOM、NIfTI、FreeSurfer、recon-all、皮层表面、pial surface、STL、3D打印大脑、brain stl、脑模型。
+description: Generate a 3D-printable brain cortex STL from brain MRI (DICOM/NIfTI). Covers dcm2niix conversion, FreeSurfer recon-all cortical reconstruction, pial surface extraction, hemisphere merge + watertight, and Taubin smoothing. Triggers: MRI, DICOM, NIfTI, FreeSurfer, recon-all, cortical surface, pial surface, STL, 3D print brain, brain model.
 ---
 
-# 从脑 MRI 到 3D 打印大脑模型
+# From Brain MRI to a 3D-Printable Brain Model
 
-把一份脑部 T1 结构像 MRI，做成一个可直接切片 3D 打印的大脑皮层模型（含脑沟脑回纹理）。
+Turn a T1-weighted brain MRI into a 3D-printable cortical model (with sulcal/gyral folds) that drops straight into any slicer.
 
-**完整链路**：
+**Full pipeline**:
 
 ```
-DICOM ──dcm2niix──▶ NIfTI ──recon-all──▶ 皮层表面(pial) ──mris_convert──▶ STL ──trimesh──▶ 合并+水密+平滑
+DICOM ──dcm2niix──▶ NIfTI ──recon-all──▶ pial surface ──mris_convert──▶ STL ──trimesh──▶ merge + watertight + smooth
 ```
 
 ---
 
-## 0. 前置条件
+## 0. Prerequisites
 
-| 依赖 | 用途 | 说明 |
+| Dependency | Purpose | Notes |
 |---|---|---|
-| Docker Desktop | 跑 FreeSurfer | Windows/macOS 用 Docker Desktop，Linux 直接 docker |
-| 含 FreeSurfer 的镜像 | recon-all | 例如 `freesurfer/freesurfer:7.4.1` 官方镜像，或自建/私有神经影像镜像 |
-| FreeSurfer **License** | recon-all 必需 | 免费，需本人到官网注册获取 `license.txt` |
-| Python 环境 | mesh 处理 | 需装 `pydicom`、`dcm2niix`、`trimesh` |
+| Docker | Run FreeSurfer | Docker Desktop on Windows/macOS, native docker on Linux |
+| A FreeSurfer image | recon-all | e.g. `freesurfer/freesurfer:7.4.1`, or your own neuroimaging image |
+| FreeSurfer **license** | Required by recon-all | Free, register at https://surfer.nmr.mgh.harvard.edu/registration.html |
+| Python | Mesh processing | `pydicom`, `dcm2niix`, `trimesh`, `nibabel` |
 
-> ⚠️ **FreeSurfer License**：没有 license，`recon-all` 直接拒绝运行。去 https://surfer.nmr.mgh.harvard.edu/registration.html 免费注册，拿到 `license.txt`（含你的邮箱和一段注册码）。**这个文件属于个人隐私，不要上传到任何公开仓库。**
+> ⚠️ **FreeSurfer license**: without it `recon-all` refuses to run. Register (free) at the URL above to get a `license.txt` containing your email and a registration key. **This file is private — never commit it to a public repo.**
 
 ```bash
-pip install pydicom dcm2niix trimesh
+pip install pydicom dcm2niix trimesh nibabel
 ```
 
 ---
 
 ## 1. DICOM → NIfTI
 
-先把原始 DICOM 序列转成标准 NIfTI（这里以 3D T1 结构像为例，如 `t1_mprage_sag_1mm`）。
+Convert the raw DICOM series (a 3D T1, e.g. `t1_mprage_sag_1mm`) to NIfTI:
 
 ```bash
 dcm2niix -z y -b y -f "%p" -o <output_dir> <dicom_series_dir>
 ```
 
-- `-z y`：压缩为 `.nii.gz`
-- `-b y`：同时生成 BIDS 格式的 JSON sidecar（含序列参数）
-- `-f "%p"`：文件名用协议名
+- `-z y` — compress to `.nii.gz`
+- `-b y` — also emit a BIDS JSON sidecar (sequence parameters)
+- `-f "%p"` — name files after the protocol
 
-验证结果（体素应接近各向同性 1mm 最佳）：
+Verify the result (voxels should be near-isotropic 1mm):
 
 ```bash
 python -c "import nibabel as n; img=n.load('<t1>.nii.gz'); print(img.shape, img.header.get_zooms(), n.aff2axcodes(img.affine))"
 ```
 
-期望输出类似 `(256, 256, 208) (0.9, 0.9, 0.9) ('R','A','S')` —— 方向已被 dcm2niix 校正为 RAS。
+Expect something like `(256, 256, 208) (0.9, 0.9, 0.9) ('R','A','S')` — dcm2niix has already reoriented it to RAS.
 
 ---
 
-## 2. FreeSurfer recon-all 皮层重建
+## 2. FreeSurfer recon-all
 
-这一步最耗时（CPU 上 **4~8 小时**），建议后台跑。
+The slowest step (4–8 hours on CPU). Run it in the background.
 
-### 2.1 准备运行脚本
+### 2.1 Prepare the script
 
-把 license 和数据放在同一个目录（下文挂载为容器内 `/data`），写 `run_recon.sh`：
+The runnable script is [`scripts/run_recon.sh`](scripts/run_recon.sh). It sources FreeSurfer, points at your license, and launches `recon-all -all`. Edit the config block at the top (`SUBJECT`, `INPUT_NIFTI`, `NTHREADS`, `FREESURFER_HOME`).
 
-```bash
-#!/bin/bash
-export FREESURFER_HOME=/usr/local/freesurfer/7.4.1   # 视镜像实际路径而定
-export FS_LICENSE=/data/license.txt
-source $FREESURFER_HOME/SetUpFreeSurfer.sh
-export SUBJECTS_DIR=/data/freesurfer
-mkdir -p $SUBJECTS_DIR
-recon-all -all -s subj01 -i /data/<t1>.nii.gz -openmp 16 \
-    > /data/recon_all.log 2>&1
-```
-
-### 2.2 后台启动
+### 2.2 Launch in the background
 
 ```bash
 docker run -d --name recon \
   -v "<data_dir>:/data" \
-  <neuroimage-image> bash /data/run_recon.sh
+  <neuroimage-image> bash /data/scripts/run_recon.sh
 ```
 
-### 2.3 跟踪进度
+### 2.3 Track progress
 
-recon-all 会写两个日志，随时可查：
+recon-all writes two logs you can inspect anytime:
 
 ```bash
-# 总体日志（stdout）
-tail -f <data_dir>/recon_all.log
-
-# 已完成的步骤列表
-grep '^#@#' <data_dir>/freesurfer/subj01/scripts/recon-all-status.log
+tail -f <data_dir>/recon_all.log                                   # overall stdout
+grep '^#@#' <data_dir>/freesurfer/subj01/scripts/recon-all-status.log   # completed steps
 ```
 
-完成的标志是日志末尾出现：
+Success marker at the end of the log:
 
 ```
 recon-all -s subj01 finished without error at ...
 ```
 
-> 💡 **耗时分布**：`autorecon1`（预处理，~15min）→ `autorecon2`（分割+表面重建，1~2h）→ `autorecon3`（球面配准+皮层，2~3h）。最慢的三个环节是「自动拓扑修复」「左右半球球面配准」「皮层分块标注」，进度卡住属正常。
+> 💡 **Timing**: `autorecon1` (preprocessing, ~15 min) → `autorecon2` (segmentation + surface reconstruction, 1–2 h) → `autorecon3` (spherical registration + cortex, 2–3 h). The three slowest stages — automatic topology fixer, per-hemisphere spherical registration, and cortical parcellation — are where progress appears to stall; that's normal.
 >
-> 💡 **Docker Desktop 资源**：Windows/macOS 上 `docker info` 里的 `CPUs`/`Total Memory` 才是容器实际可用的（通常被限制为宿主机的 75%），`-openmp` 别设得比这个还大。
+> 💡 **Docker Desktop resources**: check `docker info` for the real `CPUs`/`Total Memory` (often capped below the host). Don't set `-openmp` higher than that.
 
 ---
 
-## 3. pial 表面 → STL
+## 3. pial surface → STL
 
-recon-all 完成后，`surf/` 目录下会有皮层表面文件。用 FreeSurfer 自带的 `mris_convert` 转成 STL：
+After recon-all, convert the cortical surfaces to STL with FreeSurfer's `mris_convert`:
 
 ```bash
 docker run --rm -v "<data_dir>:/data" <neuroimage-image> bash -c '
@@ -120,72 +106,54 @@ docker run --rm -v "<data_dir>:/data" <neuroimage-image> bash -c '
 '
 ```
 
-> ⚠️ **常见坑**：在 Windows 挂载目录下，`lh.pial` / `rh.pial` 显示为 **0 字节**——它们其实是**符号链接**（`lh.pial -> lh.pial.T1`），真实文件是 `lh.pial.T1`（几 MB）。Windows 文件管理器不识别 Linux 符号链接会显示 0 字节，但在容器内用 `mris_convert` 读 `lh.pial` 会自动跟随链接，数据是完整的，无需处理。
+> ⚠️ **Gotcha**: on a Windows-mounted directory, `lh.pial` / `rh.pial` show as **0 bytes** — they are **symlinks** (`lh.pial -> lh.pial.T1`); the real file is `lh.pial.T1` (several MB). Windows Explorer shows Linux symlinks as 0-byte files, but inside the container `mris_convert` follows the link fine — the data is complete, nothing to fix.
 
-FreeSurfer 的 pial 表面**本身就是水密闭合网格**（覆盖整个皮层，含中线内侧和底面封口），左右半球各自独立闭合，非常适合直接 3D 打印。
+FreeSurfer's pial surfaces are **already watertight closed meshes** (they cover the whole cortex, including the medial wall and basal closure), one closed shell per hemisphere — ideal for 3D printing.
 
 ---
 
-## 4. 合并左右半球 + 水密化（trimesh）
+## 4. Merge hemispheres + watertight
 
-```python
-# merge_stl.py
-import trimesh, os
+Run [`scripts/merge_stl.py`](scripts/merge_stl.py):
 
-OUT = "./output"
-lh = trimesh.load(os.path.join(OUT, "lh.pial.stl"))
-rh = trimesh.load(os.path.join(OUT, "rh.pial.stl"))
-
-# 合并两个水密壳（各自已 watertight=True）
-combined = trimesh.util.concatenate([lh, rh])
-combined = combined.process(validate=True)   # 合并重复顶点、去退化面
-combined.fix_normals()                        # 法线统一朝外
-
-combined.export(os.path.join(OUT, "brain_full.stl"))
-print(f"watertight={combined.is_watertight}, "
-      f"vol={combined.volume/1000:.1f} cm3, "
-      f"extents={combined.extents}")
+```bash
+python scripts/merge_stl.py
 ```
 
-输出 `brain_full.stl`：含左右两个半球壳（大脑纵裂处自然分开，符合真实解剖），每个壳都水密，可直接切片。
+Produces `output/brain_full.stl` — the two hemisphere shells in one file (separated at the interhemispheric fissure, as in real anatomy), each shell watertight and slicer-ready.
 
 ---
 
-## 5. Taubin 平滑（可选，推荐）
+## 5. Taubin smoothing (optional, recommended)
 
-pial 表面是逐顶点优化出来的，带有细小的表面噪声。3D 打印前做一次 **Taubin 平滑**（收缩+膨胀交替，保体积、保沟回），打印出来更顺滑：
+Pial surfaces carry fine per-vertex noise. A Taubin pass (shrink + expand alternating → smooths noise, preserves volume and folds) makes for a cleaner print. Run [`scripts/smooth_stl.py`](scripts/smooth_stl.py):
 
-```python
-# smooth_stl.py
-import trimesh
-
-mesh = trimesh.load("./output/brain_full.stl")
-# lamb 收缩 + nu 膨胀交替，净效果平滑且不塌陷沟回
-smooth = trimesh.smoothing.filter_taubin(mesh, lamb=0.5, nu=-0.53, iterations=10)
-smooth.fix_normals()
-smooth.export("./output/brain_full_smooth.stl")
+```bash
+python scripts/smooth_stl.py
 ```
 
-- `iterations=10`：轻-中度平滑，抹平噪声、保留脑沟脑回
-- 想更光滑 → 加到 20；想保留更多细节 → 减到 5
-- 平滑后体积约 −5~7%（抹平表面凹凸的正常现象），水密性保持
+- `iterations=10` — light-to-moderate smoothing; removes noise, keeps folds
+- smoother → 20; keep more detail → 5
+- volume drops ~5–7% (normal: surface bumps are flattened), watertightness is preserved
 
 ---
 
-## 6. 常见问题速查
+## 6. Troubleshooting
 
-| 现象 | 原因 / 解决 |
+| Symptom | Cause / fix |
 |---|---|
-| `recon-all` 报 license 错误 | `$FREESURFER_HOME/license.txt` 不存在或 `FS_LICENSE` 未设置 |
-| `lh.pial` 0 字节 | 是符号链接，指向 `lh.pial.T1`，容器内正常 |
-| 卡在某步很久 | 拓扑修复/球面配准本来就慢，查 `recon-all-status.log` 确认还在推进 |
-| 容器内找不到 `mris_convert` | 未 `source SetUpFreeSurfer.sh`，用完整路径 `/usr/local/freesurfer/7.4.1/bin/mris_convert` |
-| Docker 比预期慢 | 看 `docker info` 的实际 `CPUs`，Docker Desktop 默认只分到宿主机的一部分 |
+| `recon-all` license error | `license.txt` missing under `$FREESURFER_HOME` or `FS_LICENSE` not set |
+| `lh.pial` is 0 bytes | It's a symlink to `lh.pial.T1`; fine inside the container |
+| Stuck on a step for a long time | Topology fix / spherical registration are slow; check `recon-all-status.log` to confirm it's still advancing |
+| `mris_convert` not found | `SetUpFreeSurfer.sh` not sourced; use full path `/usr/local/freesurfer/7.4.1/bin/mris_convert` |
+| Docker slower than expected | Check actual `CPUs` in `docker info` — Docker Desktop only allocates a fraction of the host |
 
 ---
 
-## 附：本流程用到的完整脚本
+## Scripts
 
-`run_recon.sh`（见 §2.1）、`merge_stl.py`（见 §4）、`smooth_stl.py`（见 §5）可原样复用。
+- [`scripts/run_recon.sh`](scripts/run_recon.sh) — recon-all wrapper (config at top)
+- [`scripts/merge_stl.py`](scripts/merge_stl.py) — concatenate lh/rh pial STLs
+- [`scripts/smooth_stl.py`](scripts/smooth_stl.py) — Taubin smoothing
 
-**隐私提醒**：MRI 数据、患者信息、FreeSurfer license 均属敏感内容，切勿提交到公开仓库。
+**Privacy**: MRI data, patient info, and the FreeSurfer license are all sensitive — never commit them to a public repository.
