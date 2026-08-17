@@ -1,11 +1,11 @@
 ---
-name: cortexforge
-description: Generate a 3D-printable brain cortex STL from brain MRI (DICOM/NIfTI). Covers dcm2niix conversion, FreeSurfer environment setup and recon-all cortical reconstruction, pial surface extraction, hemisphere merge + watertight, and Taubin smoothing. Includes detailed FreeSurfer setup for beginners. Triggers: MRI, DICOM, NIfTI, FreeSurfer, recon-all, cortical surface, pial surface, STL, 3D print brain, brain model.
+name: brainforge
+description: Generate a complete 3D-printable whole-brain STL (cerebrum + cerebellum + brainstem) from brain MRI (DICOM/NIfTI). Covers dcm2niix conversion, FreeSurfer environment setup and recon-all cortical reconstruction, pial surface extraction, aseg cerebellum/brainstem extraction, per-part smoothing, tentorial-gap trim, and boolean-union merging. Includes detailed FreeSurfer setup for beginners. Triggers: MRI, DICOM, NIfTI, FreeSurfer, recon-all, cortical surface, pial surface, cerebellum, brainstem, whole brain, STL, 3D print brain, brain model.
 ---
 
-# 🧠 CortexForge
+# 🧠 BrainForge
 
-> Forge a 3D-printable brain from any MRI.
+> Forge a complete, 3D-printable brain — cerebrum, cerebellum, and brainstem — from any MRI.
 
 Turn a T1-weighted brain MRI into a 3D-printable cortical model (with sulcal/gyral folds) that drops straight into any slicer.
 
